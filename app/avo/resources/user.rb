@@ -12,5 +12,8 @@ class Avo::Resources::User < Avo::BaseResource
     field :id, as: :id
     field :name, as: :text
     field :requirements, as: :has_many, nested: true
+    field :organizations, as: :has_many, through: :user_organizations, name: "Organizations"
+
+    field :user_organizations, as: :has_many, nested: true, show_on: :forms, name: "Organizations"
   end
 end
