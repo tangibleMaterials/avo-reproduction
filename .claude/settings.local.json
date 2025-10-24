@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(rails generate model EnrollmentNote course_id:integer student_id:integer note_text:text created_by:string)",
+      "Bash(rails generate avo:action MarkNoteAsReviewed)",
+      "Bash(rails generate migration AddReviewedToEnrollmentNotes reviewed:boolean reviewed_at:datetime reviewed_by:string)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
