@@ -61,4 +61,6 @@ group :test do
   gem "capybara"
   gem "selenium-webdriver"
 end
-gem "avo-advanced", ">= 3.17"
+
+gem "avo", github: "avo-hq/avo", branch: "avo-834/fix/composite_primary_keys"
+gem "avo-advanced", "3.25.2", source: "https://packager.dev/avo-hq/"
