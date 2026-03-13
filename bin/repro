@@ -1,0 +1,9 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Reproduction script for https://github.com/avo-hq/avo/issues/4301
+#
+# Delegates to bin/repro_isolated, which contains the actual reproduction.
+# See that script and README.md for full details.
+
+exec(RbConfig.ruby, File.expand_path("repro_isolated", __dir__), *ARGV)

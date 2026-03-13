@@ -61,4 +61,4 @@ group :test do
   gem "capybara"
   gem "selenium-webdriver"
 end
-gem "avo-advanced", ">= 3.17"
+gem "avo-advanced", "3.30.1"

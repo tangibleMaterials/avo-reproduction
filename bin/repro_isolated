@@ -1,0 +1,97 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Isolated reproduction script for https://github.com/avo-hq/avo/issues/4301
+#
+# This is a clean, minimal reproduction. It loads avo-advanced (and transitively
+# avo-dashboards) WITHOUT loading Rails first. This is exactly the failure mode
+# triggered by:
+#
+#   - Sidekiq Enterprise's sidekiqswarm (preloads gems for COW before booting Rails)
+#   - Puma in cluster mode with custom pre-fork gem preloading
+#   - Any script that runs: ruby -e "require 'bundler/setup'; Bundler.require"
+#     when 'rails' is not in the Bundler.require call (e.g. in a background job
+#     process that doesn't include the web/assets gem group)
+#
+# Expected output (with the bug):
+#   uninitialized constant Rails (NameError)
+#
+# Expected output (fixed):
+#   OK
+#
+# Usage:
+#   bundle exec bin/repro_isolated
+
+ENV["BUNDLE_GEMFILE"] ||= File.expand_path("../Gemfile", __dir__)
+
+require "bundler/setup"
+
+# Build a load path that includes avo gems but NOT rails
+avo_gem_paths = %w[
+  avo-advanced
+  avo
+  avo-dashboards
+  avo-pro
+  avo-menu
+  avo-dynamic_filters
+  avo-icons
+].map do |gem_name|
+  spec = Gem.loaded_specs[gem_name]
+  spec&.load_paths || []
+end.flatten
+
+extra_paths = %w[
+  zeitwerk
+  activesupport
+  i18n
+  concurrent-ruby
+  tzinfo
+  base64
+  bigdecimal
+  connection_pool
+  minitest
+].map do |gem_name|
+  spec = Gem.loaded_specs[gem_name]
+  spec&.load_paths || []
+end.flatten
+
+load_path = (avo_gem_paths + extra_paths).uniq
+
+puts "=" * 60
+puts "Reproducing avo-hq/avo#4301"
+puts "=" * 60
+puts
+puts "Spawning subprocess that loads avo-dashboards WITHOUT Rails..."
+puts "(This simulates a Puma fork master or sidekiqswarm pre-loading gems)"
+puts
+
+result = system(
+  { "BUNDLE_GEMFILE" => ENV["BUNDLE_GEMFILE"] },
+  RbConfig.ruby,
+  "-I", load_path.join(File::PATH_SEPARATOR),
+  "-e", <<~RUBY
+    require "zeitwerk"
+    require "active_support"
+
+    puts "Rails defined before require: \#{defined?(Rails).inspect}"
+    puts "Loading avo-dashboards..."
+
+    require "avo/dashboards"
+
+    puts "Rails defined after require: \#{defined?(Rails).inspect}"
+    puts
+    puts "OK — No error. The issue appears to be fixed in this version."
+  RUBY
+)
+
+if result
+  puts
+  puts "✓ No crash — gem loaded successfully."
+else
+  puts
+  puts "✗ Crash confirmed — the bug is present in this Avo version."
+  puts
+  puts "Root cause: avo-dashboards/lib/avo/dashboards.rb requires"
+  puts "  avo/dashboards/engine without guarding with 'if defined?(Rails)'"
+  puts "  causing Rails::Engine to be referenced before Rails is loaded."
+end

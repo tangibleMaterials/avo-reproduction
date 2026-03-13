@@ -39,3 +39,22 @@ plugin :solid_queue if ENV["SOLID_QUEUE_IN_PUMA"]
 # Specify the PID file. Defaults to tmp/pids/server.pid in development.
 # In other environments, only set the PID file if requested.
 pidfile ENV["PIDFILE"] if ENV["PIDFILE"]
+
+# ---------------------------------------------------------------------------
+# FORK MODE (cluster mode) — context for avo-hq/avo#4301
+# ---------------------------------------------------------------------------
+#
+# Puma's cluster mode forks worker processes from a master process. Production
+# deployments often pre-load gems into the master process BEFORE forking so
+# workers share those memory pages via COW (Copy-on-Write). This is exactly
+# what Sidekiq Enterprise's `sidekiqswarm` does, and it is the pattern that
+# triggers avo-hq/avo#4301.
+#
+# Run in cluster mode:
+#   WEB_CONCURRENCY=2 bundle exec puma
+#
+# The crash can be reproduced without starting a full web server by running:
+#   bundle exec bin/repro_isolated
+#
+# Enable cluster (fork) mode when WEB_CONCURRENCY > 0
+workers ENV.fetch("WEB_CONCURRENCY", 0).to_i if ENV.fetch("WEB_CONCURRENCY", 0).to_i > 0
