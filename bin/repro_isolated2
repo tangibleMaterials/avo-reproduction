@@ -1,0 +1,156 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# bin/repro_isolated2
+#
+# Reproduces avo-hq/avo#4301 using an actual Process.fork, matching the
+# Sidekiq Enterprise sidekiqswarm / Puma cluster preload lifecycle:
+#
+#   PARENT: preload gems (Bundler.require) BEFORE Rails is loaded
+#   fork()
+#   CHILD:  boot Rails (require config/environment) → run initializers
+#
+# This exposes two distinct failure modes depending on the avo version:
+#
+#   <= 3.30.1  PARENT crashes during gem preload:
+#              NameError: uninitialized constant Rails
+#              engine.rb references ::Rails::Engine without a guard.
+#              (This is what bin/repro_isolated demonstrates, via subprocess.)
+#
+#   >= 3.30.2  PARENT survives. CHILD crashes during Rails boot:
+#              NoMethodError: undefined method 'configure' for module Avo
+#
+#              Why: lib/avo.rb ran in the parent with Rails undefined, so
+#              `loader.eager_load if defined?(Rails)` was skipped. After fork,
+#              `require "avo"` is a no-op ($LOADED_FEATURES already has it),
+#              so eager_load never gets a second chance to run. The file that
+#              defines Avo.configure — lib/avo/configuration.rb — is never
+#              loaded. When config/initializers/avo.rb calls Avo.configure,
+#              Ruby does a method lookup on the Avo module, finds nothing, and
+#              raises NoMethodError. Zeitwerk's const_missing hook cannot help
+#              here: it intercepts constant lookups, not method calls.
+#
+# Why bin/repro_isolated passes on >= 3.30.2 but this script fails:
+#   repro_isolated spawns a clean subprocess that only calls
+#   `require "avo/dashboards"` and checks for NameError. It never boots Rails
+#   in a forked worker, so it never reaches the initializer that calls
+#   Avo.configure. This is the gap between the maintainer's test and the
+#   production failure.
+#
+# Usage:
+#   bundle exec bin/repro_isolated2
+
+ENV["BUNDLE_GEMFILE"] ||= File.expand_path("../Gemfile", __dir__)
+ENV["RAILS_ENV"] ||= "development"
+APP_ROOT = File.expand_path("..", __dir__)
+
+$stdout.sync = true
+
+require "bundler/setup"
+
+puts "=" * 60
+puts "Reproducing avo-hq/avo#4301 (fork mode)"
+puts "=" * 60
+puts
+puts "Simulates: sidekiqswarm master preloads gems, then forks workers"
+puts
+
+avo_version = Gem.loaded_specs["avo-dashboards"]&.version&.to_s || "unknown"
+puts "avo-dashboards: #{avo_version}"
+puts
+
+# ── PARENT: preload gems without Rails ────────────────────────────────────────
+
+puts "PARENT [pid=#{Process.pid}]: preloading avo gems (Rails not yet loaded)..."
+puts "PARENT: defined?(Rails) = #{defined?(Rails).inspect}"
+puts
+
+parent_crash = nil
+
+begin
+  require "avo/advanced"
+rescue NameError => e
+  parent_crash = e
+end
+
+if parent_crash
+  puts "PARENT CRASH during gem preload:"
+  puts "  #{parent_crash.class}: #{parent_crash.message}"
+  puts parent_crash.backtrace.first(6).map { |l| "    #{l}" }.join("\n")
+  puts
+  puts "=" * 60
+  puts "✗ CRASH IN PARENT (gem preload phase) — avo-dashboards <= 3.30.1"
+  puts "=" * 60
+  puts
+  puts "engine.rb:3 references ::Rails::Engine before Rails is loaded."
+  puts "Fixed in 3.30.2 by adding `if defined?(Rails)` guards in"
+  puts "avo-dashboards, avo-pro, and avo-advanced."
+  puts
+  puts "The deeper fork-mode crash (NoMethodError: undefined method 'configure')"
+  puts "is hidden behind this earlier crash. Upgrade to >= 3.30.2 to expose it."
+  exit 1
+end
+
+puts "PARENT: gem preload succeeded."
+puts "PARENT: Avo.respond_to?(:configure) = #{Avo.respond_to?(:configure)}"
+puts "PARENT:   ^ false: loader.eager_load was skipped (Rails not defined)"
+puts "PARENT:   ^ lib/avo/configuration.rb never loaded → Avo.configure never defined"
+puts
+
+# ── fork() ────────────────────────────────────────────────────────────────────
+
+puts "PARENT: forking worker process..."
+puts
+$stdout.flush
+
+pid = fork do
+  $stdout.sync = true
+
+  puts "CHILD  [pid=#{Process.pid}]: starting..."
+  puts "CHILD:  defined?(Rails) = #{defined?(Rails).inspect}"
+  puts "CHILD:  'avo.rb' in \$LOADED_FEATURES: #{$LOADED_FEATURES.any? { |f| f.end_with?("/avo.rb") }}"
+  puts "CHILD:    ^ require 'avo' is a no-op — already loaded in parent"
+  puts "CHILD:    ^ loader.eager_load at bottom of lib/avo.rb will NOT re-run"
+  puts "CHILD:    ^ lib/avo/configuration.rb will NOT be loaded"
+  puts "CHILD:    ^ Avo.configure will NOT exist when the initializer runs"
+  puts
+  puts "CHILD:  booting Rails (require config/environment)..."
+  puts
+
+  begin
+    require File.join(APP_ROOT, "config/environment")
+    puts "CHILD:  Rails booted without error."
+    exit 0
+  rescue => e
+    puts "CHILD CRASH during Rails boot:"
+    puts "  #{e.class}: #{e.message}"
+    puts e.backtrace.first(10).map { |l| "    #{l}" }.join("\n")
+    exit 1
+  end
+end
+
+_, status = Process.waitpid2(pid)
+
+puts
+puts "=" * 60
+if status.success?
+  puts "✓ No crash — the bug is not present in this version."
+  puts "=" * 60
+else
+  puts "✗ CRASH IN CHILD (Rails boot phase) — avo-dashboards >= 3.30.2"
+  puts "=" * 60
+  puts
+  puts "Why bin/repro_isolated passes on 3.30.2 but this script fails:"
+  puts "  repro_isolated only tests `require 'avo/dashboards'` for NameError."
+  puts "  It never boots Rails in a forked worker, so it never exercises the"
+  puts "  initializer that calls Avo.configure. The maintainer's test confirmed"
+  puts "  the NameError fix — but not the deeper preload-then-fork failure."
+  puts
+  puts "Root cause:"
+  puts "  lib/avo.rb ran in the parent without Rails defined."
+  puts "  `loader.eager_load if defined?(Rails)` was skipped."
+  puts "  lib/avo/configuration.rb was never loaded → Avo.configure never defined."
+  puts "  After fork, require 'avo' is a no-op (\$LOADED_FEATURES already has it)."
+  puts "  eager_load never gets a second chance. Avo.configure stays undefined."
+  puts "  config/initializers/avo.rb calls Avo.configure → NoMethodError."
+end
